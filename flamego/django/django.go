@@ -2,6 +2,7 @@ package django
 
 import (
 	"fmt"
+	"github.com/flosch/pongo2/v6"
 	"github.com/xingmoo/library/utils"
 	"io"
 	"net/http"
@@ -9,9 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
-
-	"github.com/flosch/pongo2/v6"
 )
 
 // Engine struct
@@ -26,7 +24,6 @@ type Engine struct {
 	// views extension
 	extension string
 	// layout variable name that incapsulates the template
-	layout string
 	// determines if the engine parsed all templates
 	loaded bool
 	// reload on each render
@@ -50,7 +47,6 @@ func New(directory, extension string) *Engine {
 		right:     "}}",
 		directory: directory,
 		extension: extension,
-		layout:    "embed",
 		funcmap:   make(map[string]interface{}),
 	}
 	return engine
@@ -63,7 +59,6 @@ func NewFileSystem(fs http.FileSystem, extension string) *Engine {
 		directory:  "/",
 		fileSystem: fs,
 		extension:  extension,
-		layout:     "embed",
 		funcmap:    make(map[string]interface{}),
 	}
 	return engine
@@ -79,17 +74,11 @@ func NewPathForwardingFileSystem(fs http.FileSystem, directory string, extension
 	return engine
 }
 
-// Layout defines the variable name that will incapsulate the template
-func (e *Engine) Layout(key string) *Engine {
-	e.layout = key
-	return e
-}
-
 // Delims sets the action delimiters to the specified strings, to be used in
 // templates. An empty delimiter stands for the
 // corresponding default: {{ or }}.
 func (e *Engine) Delims(left, right string) *Engine {
-	fmt.Println("delims: this method is not supported for django")
+
 	return e
 }
 
@@ -118,7 +107,6 @@ func (e *Engine) Debug(enabled bool) *Engine {
 
 // Parse is deprecated, please use Load() instead
 func (e *Engine) Parse() error {
-	fmt.Println("Parse() is deprecated, please use Load() instead.")
 	return e.Load()
 }
 
@@ -185,8 +173,11 @@ func (e *Engine) Load() error {
 		// Create new template associated with the current one
 		tmpl, err := pongoset.FromBytes(buf)
 		if err != nil {
-			return err
+			return fmt.Errorf("views: parsed template：%s error，%w", rel, err)
 		}
+		tmpl.Options.TrimBlocks = true
+		tmpl.Options.LStripBlocks = true
+
 		e.Templates[name] = tmpl
 		// Debugging
 		if e.debug {
@@ -231,10 +222,7 @@ func (e *Engine) ReanderBytes(template string, binding any) ([]byte, error) {
 	}
 
 	bind := getPongoBinding(binding)
-	started := time.Now()
-	bind["renderTime"] = func() string {
-		return fmt.Sprint(time.Since(started).Nanoseconds()/1e6) + "ms"
-	}
+
 	return tmpl.ExecuteBytes(bind)
 
 }

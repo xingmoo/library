@@ -1,18 +1,18 @@
 package context
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"github.com/flamego/flamego"
 	"github.com/mileusna/useragent"
+	"github.com/xingmoo/library/utils"
 	"go.uber.org/zap"
 	"io"
 	"net/http"
 	"strings"
-)
-
-const (
-	viewDataContextKey = "__vdata__"
-	contextKey         = "__xingmo_http_context__"
+	"sync"
+	"time"
 )
 
 type Views interface {
@@ -30,12 +30,19 @@ type Context struct {
 	views     Views
 	vdata     ViewData
 	userAgent *useragent.UserAgent
+
+	layout        string
+	disableLayout bool
+	options       Options
+
+	vdataPool *sync.Pool
 }
 
 type Options struct {
-	Views       Views
-	ContentType string
-	Logger      *zap.Logger
+	Views         Views
+	ContentType   string
+	Logger        *zap.Logger
+	DefaultLayout string
 }
 
 func Contexter(opts ...Options) flamego.Handler {
@@ -47,6 +54,9 @@ func Contexter(opts ...Options) flamego.Handler {
 	parseRenderOptions := func(opts Options) Options {
 		if opts.ContentType == "" {
 			opts.ContentType = "text/html; charset=utf-8"
+		}
+		if opts.DefaultLayout == "" {
+			opts.DefaultLayout = "layout/main"
 		}
 		return opts
 	}
@@ -60,6 +70,7 @@ func Contexter(opts ...Options) flamego.Handler {
 			Render:  render,
 			views:   opt.Views,
 			logger:  opt.Logger,
+			options: opt,
 		}
 		c.vdata = ViewData{"ctx": c}
 
@@ -146,6 +157,27 @@ func (c *Context) Views() Views {
 	return c.views
 }
 
+const viewBlockKeyPrefix = "view_block_"
+
+func (c *Context) SetViewBlock(name string, val any) {
+	c.vdata[viewBlockKeyPrefix+name] = val
+}
+func (c *Context) GetViewBlock(name string) (any, bool) {
+	val, ok := c.vdata[viewBlockKeyPrefix+name]
+	return val, ok
+}
+
+func (c *Context) DisableLayout(b bool) {
+
+	c.disableLayout = b
+
+}
+
+func (c *Context) Layout(layout string) {
+	c.layout = layout
+
+}
+
 func (c *Context) HtmlByte(tpl string, data ...ViewData) ([]byte, error) {
 	if c.views == nil {
 		return nil, errors.New("not support template")
@@ -157,7 +189,52 @@ func (c *Context) HtmlByte(tpl string, data ...ViewData) ([]byte, error) {
 		}
 	}
 
-	return c.views.ReanderBytes(tpl, map[string]any(c.vdata))
+	//统计渲染时间
+	started := time.Now()
+	c.vdata["renderTime"] = func() string {
+		return fmt.Sprint(time.Since(started).Nanoseconds()/1e6) + "ms"
+	}
+
+	parsed, err := c.views.ReanderBytes(tpl, map[string]any(c.vdata))
+	if err != nil {
+		return nil, err
+	}
+	parsed = bytes.TrimSpace(parsed)
+	if c.disableLayout {
+		return parsed, nil
+	}
+
+	//渲染layout
+	//已使用的layout
+	usedLayout := make([]string, 1)
+	for {
+
+		if c.layout == "" {
+			c.layout = c.options.DefaultLayout
+		}
+
+		for _, v := range usedLayout {
+			if v == c.layout {
+				return nil, errors.New("layout loop " + c.layout)
+			}
+		}
+		usedLayout = append(usedLayout, c.layout)
+
+		c.vdata["__content__"] = utils.UnsafeString(parsed)
+		//禁用layout
+		c.disableLayout = true
+		parsed, err = c.views.ReanderBytes(c.layout, map[string]any(c.vdata))
+
+		if err != nil {
+			return nil, err
+		}
+		parsed = bytes.TrimSpace(parsed)
+		//如果禁用layout
+		if c.disableLayout {
+			return parsed, nil
+		}
+
+	}
 }
 
 // Html 渲染模板
@@ -172,7 +249,7 @@ func (c *Context) Html(status int, tpl string, data ...ViewData) {
 		}
 		return
 	}
-	c.ResponseWriter().Header().Set("Content-Type", "text/html; charset=utf-8")
+	c.ResponseWriter().Header().Set("Content-Type", c.options.ContentType)
 	c.ResponseWriter().WriteHeader(status)
 	_, err = c.ResponseWriter().Write(buf)
 	if err != nil {
